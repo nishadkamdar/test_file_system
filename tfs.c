@@ -65,8 +65,29 @@ static struct dentry *tfs_mount(struct file_system_type *fs_type,
 				 void *data);
 static void tfs_kill_sb(struct super_block *sb);
 static int tfs_fill_super(struct super_block *sb, void *data, int silent);
-
+static unsigned long ramfs_mmu_get_unmapped_area(struct file *file,
+		unsigned long addr, unsigned long len, unsigned long pgoff,
+		unsigned long flags);
 static struct inode *tfs_root_inode;
+static int tfs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool excl);
+static int tfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev);
+static int tfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
+
+const struct file_operations tfs_file_operations = {
+	.read_iter	= generic_file_read_iter,
+	.write_iter	= generic_file_write_iter,
+	.mmap		= generic_file_mmap,
+	.fsync		= noop_fsync,
+	.splice_read	= generic_file_splice_read,
+	.splice_write	= iter_file_splice_write,
+	.llseek		= generic_file_llseek,
+	.get_unmapped_area	= ramfs_mmu_get_unmapped_area,
+};
+
+const struct inode_operations tfs_file_inode_operations = {
+	.setattr	= simple_setattr,
+	.getattr	= simple_getattr,
+};
 
 static struct file_system_type tfs_fs_type = {
 	.owner		= THIS_MODULE,
@@ -90,7 +111,49 @@ static struct super_operations tfs_sops = {
 static struct inode_operations tfs_iops = {
 	.create		= tfs_create,
 	.lookup		= simple_lookup, // built in lookup
+	.link		= simple_link,
+	.unlink		= simple_unlink,
+	.mkdir		= tfs_mkdir,
+	.rmdir		= simple_rmdir,
+	.mknod		= tfs_mknod,
+	.rename		= simple_rename,
 };
+
+static unsigned long ramfs_mmu_get_unmapped_area(struct file *file,
+		unsigned long addr, unsigned long len, unsigned long pgoff,
+		unsigned long flags)
+{
+	return current->mm->get_unmapped_area(file, addr, len, pgoff, flags);
+}
+
+static int tfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode, dev_t dev)
+{
+	struct inode *inode = tfs_get_inode(dir->i_sb, dir, mode, dev);
+	int error = -ENOSPC;
+
+	if (inode)
+	{
+		d_instantiate(dentry, inode);
+		dget(dentry);
+		error = 0;
+		dir->i_mtime = dir->i_ctime = current_time(dir);
+	}
+
+	return error;
+}
+
+static int tfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+	int retval = tfs_mknod(dir, dentry, mode | S_IFDIR, 0);
+	if (!retval)
+		inc_nlink(dir);
+	return retval;
+}
+
+static int tfs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool excl)
+{
+	return tfs_mknod(dir, dentry, mode | S_IFREG, 0);
+}
 
 struct inode *tfs_get_inode(struct super_block *sb,
 			    const struct inode *dir,
@@ -108,13 +171,19 @@ struct inode *tfs_get_inode(struct super_block *sb,
 		inode->i_mapping->a_ops = &tfs_aops;
 		mapping_set_gfp_mask(inode->i_mapping, GFP_HIGHUSER);
 		mapping_set_unevictable(inode->i_mapping);
-		inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
-
-		inode->i_op = &tfs_iops;
-		inode->i_fop = &simple_dir_operations;
+		inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);	
+		switch (mode & S_IFMT) {
+			case S_IFREG:
+				inode->i_op = &tfs_file_inode_operations;
+				inode->i_fop = &tfs_file_operations;
+				break;
+			case S_IFDIR:
+				inode->i_op = &tfs_iops;
+				inode->i_fop = &simple_dir_operations;
+				break;
+		}
 	}
 	return inode;
-
 }
 
 static struct dentry *tfs_mount (struct file_system_type *fs_type,
